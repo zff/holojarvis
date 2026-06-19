@@ -51,6 +51,22 @@ def _to_openai_tool(t: dict) -> dict:
     }
 
 
+# 句子结束标点：流式时凑齐一句就立刻送去合成朗读
+_SENT_END = "。！？!?；;…\n"
+
+
+def _split_sentences(buf: str) -> tuple[list[str], str]:
+    """从缓冲里切出已完成的句子，返回(完整句列表, 剩余未完成串)。"""
+    out, start = [], 0
+    for i, ch in enumerate(buf):
+        if ch in _SENT_END:
+            seg = buf[start:i + 1].strip()
+            if seg:
+                out.append(seg)
+            start = i + 1
+    return out, buf[start:]
+
+
 class Brain:
     def __init__(self, api_key: str, mcp=None) -> None:
         self._api_key = api_key
@@ -133,3 +149,119 @@ class Brain:
                 })
 
         return "抱歉，这个有点复杂，我先停一下。"
+
+    # ---- 流式：边生成边吐句子，让 TTS 尽早开口 ----------------------
+    def _stream_once(self, messages: list[dict]):
+        """流式调一次中转站，逐块产出 ("content", 文本) / ("tool", 增量元组)。"""
+        body = {
+            "model": config.MODEL,
+            "messages": [{"role": "system", "content": self._system}] + messages,
+            "tools": self._tools,
+            "tool_choice": "auto",
+            "max_tokens": config.MAX_TOKENS,
+            "stream": True,
+        }
+        req = urllib.request.Request(
+            config.llm_endpoint(),
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {self._api_key}"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            for raw in resp:
+                line = raw.decode("utf-8", "ignore").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                choices = obj.get("choices") or [{}]
+                delta = choices[0].get("delta") or {}
+                if delta.get("content"):
+                    yield ("content", delta["content"])
+                for tc in delta.get("tool_calls") or []:
+                    fn = tc.get("function") or {}
+                    yield ("tool", (tc.get("index", 0), tc.get("id"),
+                                    fn.get("name"), fn.get("arguments")))
+
+    def _run_tools(self, tool_calls: list[dict]) -> None:
+        """执行一批工具调用，把结果追加进对话历史。"""
+        for tc in tool_calls:
+            fn = tc.get("function", {})
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                args = {}
+            output = self._dispatch(fn.get("name", ""), args)
+            self._messages.append({
+                "role": "tool",
+                "tool_call_id": tc.get("id", ""),
+                "content": output,
+            })
+
+    def ask_stream(self, user_text: str):
+        """处理一句用户输入；以「一句一吐」的方式产出回复文本，便于边说边生成。
+
+        工具调用轮不产出文本（不朗读），执行完工具继续下一轮；
+        纯文本轮则凑齐一句就 yield 一句。流式失败自动回退到非流式 _chat。
+        """
+        self._messages.append({"role": "user", "content": user_text})
+
+        for _ in range(8):
+            content, buf = "", ""
+            acc: dict = {}          # index -> 拼接中的工具调用
+            had_tool = False
+            try:
+                for kind, val in self._stream_once(self._messages):
+                    if kind == "content":
+                        content += val
+                        if not had_tool:        # 工具轮不朗读预流文本
+                            buf += val
+                            sents, buf = _split_sentences(buf)
+                            for s in sents:
+                                yield s
+                    else:
+                        had_tool = True
+                        idx, cid, name, args = val
+                        a = acc.setdefault(idx, {"id": "", "name": "",
+                                                 "arguments": ""})
+                        a["id"] += cid or ""
+                        a["name"] += name or ""
+                        a["arguments"] += args or ""
+            except Exception:  # noqa: BLE001 流式失败 → 回退非流式
+                msg = self._chat(self._messages)
+                tcs = msg.get("tool_calls") or []
+                text = msg.get("content") or ""
+                assistant: dict = {"role": "assistant", "content": text}
+                if tcs:
+                    assistant["tool_calls"] = tcs
+                self._messages.append(assistant)
+                if tcs:
+                    self._run_tools(tcs)
+                    continue
+                if text.strip():
+                    yield text.strip()
+                return
+
+            if had_tool and acc:
+                tcs = [{"id": a["id"], "type": "function",
+                        "function": {"name": a["name"],
+                                     "arguments": a["arguments"]}}
+                       for a in acc.values()]
+                self._messages.append({"role": "assistant",
+                                       "content": content, "tool_calls": tcs})
+                self._run_tools(tcs)
+                continue
+
+            self._messages.append({"role": "assistant", "content": content})
+            tail = buf.strip()
+            if tail:
+                yield tail
+            return
+
+        yield "抱歉，这个有点复杂，我先停一下。"

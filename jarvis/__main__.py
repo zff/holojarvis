@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import difflib
+import queue
 import re
 import subprocess
 import sys
@@ -130,9 +131,11 @@ def run_assistant(ui, stop: threading.Event) -> None:
             if clicked:
                 awake_until = time.time() + config.ACTIVE_TIMEOUT
 
-            res = asr.transcribe(audio)
-            text = res.text
+            # 省配额 + 待机隐私：待机只用本地听唤醒词（免费、不上传，且唤醒靠拼音
+            # 模糊匹配能容错）；唤醒后的命令才用讯飞云端（更准）。
             awake = time.time() < awake_until
+            res = asr.transcribe(audio, cloud=awake)
+            text = res.text
 
             if not text:
                 if not awake:
@@ -159,6 +162,11 @@ def run_assistant(ui, stop: threading.Event) -> None:
                     ui.set_state("idle")
                     awake_until = time.time() + config.ACTIVE_TIMEOUT
                     continue
+                # 「贾维斯+命令」连在一句：待机是本地转的，命令部分用讯飞重转一遍求更准
+                if config.ASR_BACKEND == "xfyun":
+                    cloud_res = asr.transcribe(audio, cloud=True)
+                    if cloud_res.text:
+                        command = _strip_wake_word(cloud_res.text)
             else:
                 # 清醒时同样过滤噪音幻听，避免把背景声/自己的回声当成命令
                 if (res.no_speech > config.WAKE_MAX_NO_SPEECH
@@ -169,16 +177,42 @@ def run_assistant(ui, stop: threading.Event) -> None:
             ui.heard(command)
             ui.set_state("thinking")
             ui.log(f"💭 处理中：{command}")
-            try:
-                reply = brain.ask(command)
-            except Exception as e:  # noqa: BLE001
-                reply = "抱歉，我这边出了点问题。"
-                ui.log(f"  大脑出错：{e}")
-            ui.log(f"🤖 贾维斯：{reply}\n")
-            ui.reply(reply)
 
-            ui.set_state("speaking")
-            tts.speak(reply, blocking=True)
+            # 流式管线：后台线程边生成边把「整句」塞进队列，主线程取到就朗读。
+            # 这样大模型生成与语音合成/播放重叠，大幅缩短「开口」等待。
+            sq: "queue.Queue[tuple[str, str]]" = queue.Queue()
+
+            def _produce(cmd: str = command) -> None:
+                try:
+                    for sent in brain.ask_stream(cmd):
+                        sq.put(("s", sent))
+                except Exception as e:  # noqa: BLE001
+                    sq.put(("err", str(e)))
+                finally:
+                    sq.put(("end", ""))
+
+            threading.Thread(target=_produce, daemon=True).start()
+
+            parts: list[str] = []
+            while True:
+                kind, val = sq.get()
+                if kind == "end":
+                    break
+                if kind == "err":
+                    ui.log(f"  大脑出错：{val}")
+                    continue
+                if not parts:
+                    ui.set_state("speaking")       # 第一句到了才切「说话」
+                parts.append(val)
+                ui.reply(val)
+                tts.speak(val, blocking=True)      # 逐句朗读，句子间不打断
+
+            reply = "".join(parts)
+            if not reply:                          # 全程没产出文本（出错等）
+                ui.set_state("speaking")
+                tts.speak("抱歉，我这边出了点问题。", blocking=True)
+            ui.log(f"🤖 贾维斯：{reply}\n")
+
             mic.flush()                            # 清掉朗读期间录进来的回声，防止自言自语
             ui.set_state("idle")
             awake_until = time.time() + config.ACTIVE_TIMEOUT
@@ -198,6 +232,9 @@ def main() -> int:
               file=sys.stderr)
         return 1
     print(f"🧠 大脑：{config.MODEL}  @ {config.LLM_BASE_URL}", file=sys.stderr)
+    _asr = ("讯飞云端·语音听写" if config.ASR_BACKEND == "xfyun"
+            else f"本地 whisper-{config.WHISPER_MODEL}")
+    print(f"🎙️ 识别：{_asr}", file=sys.stderr)
 
     if use_pet:
         try:

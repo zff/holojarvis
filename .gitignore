@@ -5,17 +5,20 @@ api_key.txt
 base_url.txt
 # 你选用的模型名
 model.txt
+# 讯飞云端识别密钥（APPID/APIKey/APISecret 三行）
+xfyun.txt
 # 个人笔记（HUD 面板内容）
 notes.txt
 # 贾维斯记住的关于你的事
 memory.json
 .jarvis_key
 
-# ===== 个人克隆音 / 大音频文件 =====
+# ===== 个人克隆音 / 大音频文件 / 宣传视频 =====
 *.wav
 *.mp3
 *.m4a
 *.flac
+*.mp4
 
 # ===== Python =====
 __pycache__/
