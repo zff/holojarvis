@@ -1,0 +1,890 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>HoloJarvis · 全息控制台</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  body { font-family: "SF Mono", "Cascadia Code", Menlo, Consolas, monospace; color: #7df9ff; }
+
+  #scene { position: fixed; inset: 0; }
+  #handOverlay { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
+
+  /* ── 深空微光 + 扫描线 ── */
+  #vignette {
+    position: fixed; inset: 0; pointer-events: none; z-index: 6;
+    background:
+      radial-gradient(ellipse 80% 60% at 50% 45%, rgba(0, 60, 90, .18), transparent 70%),
+      radial-gradient(ellipse 120% 100% at 50% 50%, transparent 55%, rgba(0,0,0,.85) 100%);
+  }
+  #scanlines {
+    position: fixed; inset: 0; pointer-events: none; z-index: 7; opacity: .5;
+    background: repeating-linear-gradient(0deg, transparent 0 2px, rgba(0,0,0,.16) 2px 4px);
+  }
+
+  /* ── 启动引导屏 ── */
+  #boot {
+    position: fixed; inset: 0; z-index: 100;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: radial-gradient(ellipse at center, #001018 0%, #000 75%);
+    transition: opacity 1s ease;
+  }
+  #boot.hide { opacity: 0; pointer-events: none; }
+  #boot h1 {
+    font-size: 28px; font-weight: 500; letter-spacing: 14px; color: #aefcff;
+    text-shadow: 0 0 24px rgba(125,249,255,.8); margin-bottom: 10px;
+  }
+  #boot .sub { font-size: 11px; letter-spacing: 4px; opacity: .5; margin-bottom: 48px; }
+  #startBtn {
+    font-family: inherit; font-size: 14px; letter-spacing: 6px; cursor: pointer;
+    padding: 14px 46px; color: #7df9ff; background: transparent;
+    border: 1px solid rgba(125,249,255,.5); border-radius: 3px;
+    text-shadow: 0 0 10px rgba(125,249,255,.8);
+    transition: all .25s ease; animation: pulse 2.4s infinite;
+  }
+  #startBtn:hover { background: rgba(125,249,255,.12); box-shadow: 0 0 30px rgba(125,249,255,.4); }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 8px rgba(125,249,255,.2); }
+    50% { box-shadow: 0 0 26px rgba(125,249,255,.55); }
+  }
+  #bootLog {
+    margin-top: 36px; font-size: 11px; letter-spacing: 2px; line-height: 2;
+    min-height: 120px; text-align: center; white-space: pre-line;
+  }
+  #bootLog .err { color: #ff8a7d; }
+  #bootLog .ok { color: #7dffb2; }
+
+  /* ── 面板通用 ── */
+  .panel {
+    position: fixed; z-index: 10; pointer-events: none;
+    background: rgba(0, 18, 28, .45);
+    border: 1px solid rgba(125, 249, 255, .22);
+    backdrop-filter: blur(5px);
+    clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px));
+    padding: 12px 16px;
+    text-shadow: 0 0 8px rgba(125, 249, 255, .6);
+    user-select: none;
+  }
+  .panel .label { font-size: 9px; letter-spacing: 3px; opacity: .5; margin-bottom: 8px; }
+  .hud { position: fixed; z-index: 10; pointer-events: none; text-shadow: 0 0 8px rgba(125,249,255,.8); user-select: none; }
+  .hud .label { font-size: 10px; letter-spacing: 3px; opacity: .55; }
+
+  /* ── 左上:标题 + 系统日志流 ── */
+  #title { top: 22px; left: 28px; max-width: 340px; }
+  #title h1 { font-size: 15px; font-weight: 500; letter-spacing: 6px; color: #aefcff; }
+  #title .sub { font-size: 9px; letter-spacing: 2px; opacity: .5; margin-top: 5px; margin-bottom: 10px; }
+  #logFeed { font-size: 9px; letter-spacing: 1px; line-height: 1.9; opacity: .65; }
+  #logFeed div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #logFeed div:first-child { color: #aefcff; opacity: 1; }
+
+  /* ── 右上:手势/语音状态 ── */
+  #status { top: 22px; right: 28px; text-align: right; min-width: 200px; }
+  #handState { font-size: 12px; letter-spacing: 2px; margin-top: 3px; color: #aefcff; }
+  #handState.active { color: #7dffb2; text-shadow: 0 0 10px rgba(125,255,178,.9); }
+  #gauge {
+    margin-top: 7px; width: 100%; height: 3px;
+    background: rgba(125,249,255,.12); border-radius: 2px; overflow: hidden;
+  }
+  #gaugeFill {
+    height: 100%; width: 0%;
+    background: linear-gradient(90deg, #0af, #7df9ff, #7dffb2);
+    box-shadow: 0 0 8px #7df9ff;
+  }
+  #voiceState { font-size: 12px; letter-spacing: 2px; margin-top: 3px; color: #aefcff; }
+  #voiceState.on { color: #7dffb2; text-shadow: 0 0 10px rgba(125,255,178,.9); }
+  #voiceState.off { color: rgba(174,252,255,.35); text-shadow: none; }
+  #status .label + * { margin-bottom: 8px; }
+
+  /* ── 右侧:时钟 + 遥测 ── */
+  #clockPanel { top: 132px; right: 28px; width: 210px; text-align: right; }
+  #clock { font-size: 30px; letter-spacing: 3px; color: #eafeff; text-shadow: 0 0 16px rgba(125,249,255,.8); }
+  #date { font-size: 10px; letter-spacing: 2px; opacity: .6; margin-top: 3px; }
+  #weather { font-size: 11px; letter-spacing: 2px; margin-top: 8px; color: #aefcff; }
+
+  #telePanel { top: 258px; right: 28px; width: 210px; }
+  .tele { margin-bottom: 9px; }
+  .tele .row1 { display: flex; justify-content: space-between; font-size: 9px; letter-spacing: 2px; opacity: .75; margin-bottom: 4px; }
+  .tele .bar { height: 3px; background: rgba(125,249,255,.12); border-radius: 2px; overflow: hidden; }
+  .tele .fill { height: 100%; width: 0%; background: #7df9ff; box-shadow: 0 0 6px #7df9ff; transition: width .6s ease; }
+  .tele .fill.warn { background: #ffc247; box-shadow: 0 0 6px #ffc247; }
+  #uptime { font-size: 9px; letter-spacing: 2px; opacity: .5; margin-top: 2px; text-align: right; }
+
+  /* ── 左侧:笔记 ── */
+  #notesPanel { top: 132px; left: 28px; width: 250px; max-height: 34vh; overflow: hidden; }
+  #notesList { font-size: 10px; letter-spacing: 1px; line-height: 2.0; opacity: .8; }
+  #notesList div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #notesList div::before { content: "▸ "; color: #7dffb2; }
+
+  /* ── 左下:控制面板 ── */
+  #panel {
+    position: fixed; left: 28px; bottom: 26px; z-index: 20;
+    display: flex; flex-direction: column; gap: 14px;
+    pointer-events: auto;
+  }
+  .group .label { font-size: 10px; letter-spacing: 3px; opacity: .55; margin-bottom: 7px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+  button.chip {
+    font-family: inherit; font-size: 11px; letter-spacing: 2px;
+    padding: 7px 14px; cursor: pointer;
+    color: #7df9ff; background: rgba(0, 30, 45, .55);
+    border: 1px solid rgba(125, 249, 255, .35); border-radius: 3px;
+    backdrop-filter: blur(6px);
+    transition: all .18s ease;
+  }
+  button.chip:hover { border-color: #7df9ff; box-shadow: 0 0 12px rgba(125,249,255,.35); }
+  button.chip.on {
+    color: #001a22; background: #7df9ff;
+    box-shadow: 0 0 18px rgba(125,249,255,.75);
+    text-shadow: none;
+  }
+  button.swatch {
+    width: 26px; height: 26px; border-radius: 50%; cursor: pointer;
+    border: 1px solid rgba(255,255,255,.25); background: var(--c);
+    box-shadow: 0 0 10px var(--c);
+    transition: transform .15s ease, box-shadow .15s ease;
+  }
+  button.swatch:hover { transform: scale(1.18); }
+  button.swatch.on { box-shadow: 0 0 18px var(--c), 0 0 4px #fff inset; transform: scale(1.12); }
+  input[type="color"] {
+    width: 26px; height: 26px; border-radius: 50%; border: 1px dashed rgba(255,255,255,.4);
+    background: transparent; cursor: pointer; padding: 0;
+  }
+
+  /* ── 右下:摄像头 ── */
+  #camWrap {
+    position: fixed; right: 28px; bottom: 26px; z-index: 20;
+    width: 190px; border: 1px solid rgba(125,249,255,.3); border-radius: 4px;
+    overflow: hidden; background: rgba(0,20,30,.4);
+    box-shadow: 0 0 20px rgba(0, 150, 200, .15);
+  }
+  #camWrap .bar {
+    font-size: 9px; letter-spacing: 2px; padding: 5px 8px; opacity: .6;
+    border-bottom: 1px solid rgba(125,249,255,.15);
+    display: flex; justify-content: space-between;
+  }
+  #video { display: block; width: 100%; transform: scaleX(-1); }
+
+  /* ── 底部:字幕 + 提示 ── */
+  #subs {
+    position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%);
+    z-index: 12; width: min(640px, 60vw); text-align: center;
+    pointer-events: none; opacity: 0; transition: opacity .5s;
+  }
+  #subs.show { opacity: 1; }
+  #subUser { font-size: 12px; letter-spacing: 1px; color: rgba(174,252,255,.55); margin-bottom: 8px; }
+  #subJarvis {
+    font-size: 15px; letter-spacing: 1px; line-height: 1.8; color: #eafeff;
+    text-shadow: 0 0 12px rgba(125,249,255,.7);
+  }
+
+  #hint {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+    z-index: 10; font-size: 10px; letter-spacing: 2px; opacity: .4;
+    pointer-events: none; text-align: center; line-height: 1.9;
+  }
+
+  #toast {
+    position: fixed; left: 50%; top: 60px; transform: translateX(-50%);
+    z-index: 110; font-size: 12px; letter-spacing: 2px; padding: 10px 22px;
+    color: #ffb27d; border: 1px solid rgba(255,178,125,.4); border-radius: 3px;
+    background: rgba(40,20,0,.75); backdrop-filter: blur(6px);
+    opacity: 0; transition: opacity .4s; pointer-events: none; max-width: 80vw;
+  }
+  #toast.show { opacity: 1; }
+
+  /* 窄屏收起两侧信息面板 */
+  @media (max-width: 980px) {
+    #notesPanel, #telePanel { display: none; }
+  }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<canvas id="handOverlay"></canvas>
+<div id="vignette"></div>
+<div id="scanlines"></div>
+
+<div id="boot">
+  <h1>J.A.R.V.I.S</h1>
+  <div class="sub">HOLOGRAPHIC COMMAND CONSOLE · v3.0</div>
+  <button id="startBtn">▶ 启动系统</button>
+  <div id="bootLog"></div>
+</div>
+
+<div class="panel" id="title">
+  <h1>J.A.R.V.I.S</h1>
+  <div class="sub">HOLOGRAPHIC COMMAND CONSOLE · v3.0</div>
+  <div class="label">SYS LOG</div>
+  <div id="logFeed"></div>
+</div>
+
+<div class="panel" id="status">
+  <div class="label">GESTURE LINK</div>
+  <div id="handState">未连接</div>
+  <div id="gauge"><div id="gaugeFill"></div></div>
+  <div class="label" style="margin-top:12px">VOICE LINK</div>
+  <div id="voiceState">连接中…</div>
+</div>
+
+<div class="panel" id="clockPanel">
+  <div id="clock">--:--:--</div>
+  <div id="date"></div>
+  <div id="weather"></div>
+</div>
+
+<div class="panel" id="telePanel">
+  <div class="label">SYSTEM TELEMETRY</div>
+  <div class="tele"><div class="row1"><span>CPU</span><span id="cpuVal">--</span></div><div class="bar"><div class="fill" id="cpuBar"></div></div></div>
+  <div class="tele"><div class="row1"><span>DISK</span><span id="diskVal">--</span></div><div class="bar"><div class="fill" id="diskBar"></div></div></div>
+  <div class="tele"><div class="row1"><span>PWR</span><span id="battVal">--</span></div><div class="bar"><div class="fill" id="battBar"></div></div></div>
+  <div id="uptime"></div>
+</div>
+
+<div class="panel" id="notesPanel">
+  <div class="label">NOTES · 笔记待办</div>
+  <div id="notesList"></div>
+</div>
+
+<div id="subs">
+  <div id="subUser"></div>
+  <div id="subJarvis"></div>
+</div>
+
+<div id="panel">
+  <div class="group">
+    <div class="label">MORPH TARGET · 形态</div>
+    <div class="row" id="shapeRow">
+      <button class="chip on" data-shape="sphere">球体</button>
+      <button class="chip" data-shape="torus">环体</button>
+      <button class="chip" data-shape="helix">螺旋</button>
+      <button class="chip" data-shape="galaxy">星系</button>
+      <button class="chip" data-shape="cube">立方</button>
+      <button class="chip" data-shape="face">头像</button>
+    </div>
+  </div>
+  <div class="group">
+    <div class="label">SPECTRUM · 光谱</div>
+    <div class="row" id="colorRow">
+      <button class="swatch on" style="--c:#00e5ff" data-color="#00e5ff"></button>
+      <button class="swatch" style="--c:#7dffb2" data-color="#7dffb2"></button>
+      <button class="swatch" style="--c:#b47dff" data-color="#b47dff"></button>
+      <button class="swatch" style="--c:#ff7da8" data-color="#ff7da8"></button>
+      <button class="swatch" style="--c:#ffc247" data-color="#ffc247"></button>
+      <input type="color" id="colorPick" value="#00e5ff" title="自定义颜色" />
+    </div>
+  </div>
+</div>
+
+<div id="camWrap">
+  <div class="bar"><span>CAM · 手势追踪</span><span id="fps"></span></div>
+  <video id="video" playsinline muted autoplay></video>
+</div>
+
+<div id="hint">张开手掌 = 放大扩散 · 握拳 = 聚拢缩小 · 捏合 = 切换形态 · 移动手 = 旋转 · 点击核心 = 唤醒<br/>无摄像头:滚轮 = 张合 · 1-6 = 形态 · 空格 = 随机换色</div>
+
+<div id="toast"></div>
+
+<script src="vendor/three.min.js"></script>
+<script type="module">
+'use strict';
+
+/* ═══════════════ 基础场景 ═══════════════ */
+const COUNT = 12000;
+const canvas = document.getElementById('scene');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000104);
+scene.fog = new THREE.FogExp2(0x000104, 0.055);
+
+const camera3d = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 100);
+camera3d.position.set(0, 0.4, 7.5);
+
+/* 远景星尘 */
+{
+  const n = 900, pos = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    pos[i*3]   = (Math.random() - .5) * 60;
+    pos[i*3+1] = (Math.random() - .5) * 40;
+    pos[i*3+2] = (Math.random() - .5) * 60 - 10;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  scene.add(new THREE.Points(g, new THREE.PointsMaterial({
+    color: 0x224455, size: 0.045, transparent: true, opacity: 0.6, depthWrite: false,
+  })));
+}
+
+/* ═══════════════ 形态生成器 ═══════════════ */
+function makeTargets(count) {
+  const T = {};
+  const arr = () => new Float32Array(count * 3);
+
+  T.sphere = arr();
+  for (let i = 0; i < count; i++) {
+    const t = i / count, ga = i * 2.399963;
+    const y = 1 - 2 * t, r = Math.sqrt(1 - y * y);
+    const rad = 2.2 * (0.96 + Math.random() * 0.08);
+    T.sphere.set([Math.cos(ga)*r*rad, y*rad, Math.sin(ga)*r*rad], i*3);
+  }
+
+  T.torus = arr();
+  for (let i = 0; i < count; i++) {
+    const u = Math.random() * Math.PI * 2, v = Math.random() * Math.PI * 2;
+    const R = 1.8, r = 0.62;
+    T.torus.set([
+      (R + r*Math.cos(v)) * Math.cos(u),
+      r * Math.sin(v),
+      (R + r*Math.cos(v)) * Math.sin(u),
+    ], i*3);
+  }
+
+  T.helix = arr();
+  for (let i = 0; i < count; i++) {
+    const k = i % 10, t = (i / count) * Math.PI * 6;
+    const y = (i / count) * 5 - 2.5;
+    if (k < 4)      T.helix.set([Math.cos(t)*1.3, y, Math.sin(t)*1.3], i*3);
+    else if (k < 8) T.helix.set([Math.cos(t+Math.PI)*1.3, y, Math.sin(t+Math.PI)*1.3], i*3);
+    else {
+      const s = Math.random() * 2 - 1;
+      T.helix.set([Math.cos(t)*1.3*s, y, Math.sin(t)*1.3*s], i*3);
+    }
+  }
+
+  T.galaxy = arr();
+  for (let i = 0; i < count; i++) {
+    const arm = i % 3, r = Math.pow(Math.random(), 0.6) * 3.2;
+    const a = arm * (Math.PI*2/3) + r * 1.6 + (Math.random()-.5) * (0.45 / (r*0.4+0.3));
+    const y = (Math.random()-.5) * 0.28 * Math.exp(-r*0.6) * 4;
+    T.galaxy.set([Math.cos(a)*r, y, Math.sin(a)*r], i*3);
+  }
+
+  T.cube = arr();
+  for (let i = 0; i < count; i++) {
+    const s = 1.75, f = (Math.random()*6)|0;
+    const a = (Math.random()-.5)*2*s, b = (Math.random()-.5)*2*s;
+    const p = [[ s,a,b],[-s,a,b],[a, s,b],[a,-s,b],[a,b, s],[a,b,-s]][f];
+    T.cube.set(p, i*3);
+  }
+
+  T.face = arr();
+  for (let i = 0; i < count; i++) {
+    const t = i / count;
+    if (t < 0.82) {
+      const u = Math.random()*Math.PI*2, v = Math.acos(2*Math.random()-1);
+      let x = Math.sin(v)*Math.cos(u)*1.6, y = Math.cos(v)*2.0, z = Math.sin(v)*Math.sin(u)*1.5;
+      for (const ex of [-0.62, 0.62]) {
+        const d = Math.hypot(x-ex, y-0.42, z-1.35);
+        if (d < 0.42) z -= (0.42-d) * 1.4;
+      }
+      T.face.set([x, y, z], i*3);
+    } else if (t < 0.9) {
+      const side = t < 0.86 ? -0.62 : 0.62;
+      const a = Math.random()*Math.PI*2, rr = 0.2 + Math.random()*0.06;
+      T.face.set([side + Math.cos(a)*rr, 0.42 + Math.sin(a)*rr*0.7, 1.42], i*3);
+    } else {
+      const a = (Math.random()-.5)*1.9;
+      T.face.set([Math.sin(a)*0.75, -0.78 - Math.cos(a)*0.18 + (Math.random()-.5)*0.05, 1.38 + (Math.random()-.5)*0.05], i*3);
+    }
+  }
+  return T;
+}
+const TARGETS = makeTargets(COUNT);
+const SHAPE_KEYS = ['sphere','torus','helix','galaxy','cube','face'];
+
+/* ═══════════════ 粒子系统(自定义 Shader) ═══════════════ */
+const geo = new THREE.BufferGeometry();
+const posA    = new Float32Array(TARGETS.sphere);
+const velA    = new Float32Array(COUNT * 3);
+const targetA = new Float32Array(TARGETS.sphere);
+const seedA   = new Float32Array(COUNT);
+for (let i = 0; i < COUNT; i++) seedA[i] = Math.random();
+
+geo.setAttribute('position', new THREE.BufferAttribute(posA, 3));
+geo.setAttribute('seed', new THREE.BufferAttribute(seedA, 1));
+
+const uniforms = {
+  uColor:  { value: new THREE.Color('#00e5ff') },
+  uColor2: { value: new THREE.Color('#ffffff') },
+  uTime:   { value: 0 },
+  uEnergy: { value: 0.5 },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    attribute float seed;
+    uniform float uTime, uEnergy;
+    varying float vGlow;
+    void main() {
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      float tw = 0.75 + 0.25 * sin(uTime * (1.5 + seed * 3.0) + seed * 40.0);
+      vGlow = tw * (0.45 + uEnergy * 0.8);
+      gl_PointSize = (1.6 + seed * 2.2) * tw * (0.8 + uEnergy) * (140.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    uniform vec3 uColor, uColor2;
+    varying float vGlow;
+    void main() {
+      float d = length(gl_PointCoord - 0.5);
+      if (d > 0.5) discard;
+      float core = smoothstep(0.5, 0.0, d);
+      vec3 c = mix(uColor, uColor2, pow(core, 3.0) * 0.75);
+      gl_FragColor = vec4(c, core * core * vGlow);
+    }`,
+});
+const points = new THREE.Points(geo, mat);
+scene.add(points);
+
+/* 中心辉光 sprite */
+const glowTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const x = c.getContext('2d');
+  const g = x.createRadialGradient(64,64,0,64,64,64);
+  g.addColorStop(0, 'rgba(255,255,255,.55)');
+  g.addColorStop(0.35, 'rgba(120,220,255,.16)');
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  x.fillStyle = g; x.fillRect(0,0,128,128);
+  return new THREE.CanvasTexture(c);
+})();
+const glowMat = new THREE.SpriteMaterial({ map: glowTex, color: 0x00e5ff, transparent: true, opacity: .5, depthWrite: false, blending: THREE.AdditiveBlending });
+const glow = new THREE.Sprite(glowMat);
+glow.scale.set(6, 6, 1);
+scene.add(glow);
+
+/* ═══════════════ UI 辅助 ═══════════════ */
+const handStateEl = document.getElementById('handState');
+const gaugeFill = document.getElementById('gaugeFill');
+const fpsEl = document.getElementById('fps');
+const bootLog = document.getElementById('bootLog');
+const logFeed = document.getElementById('logFeed');
+
+function toast(msg, ms = 5000) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.classList.remove('show'), ms);
+}
+function logBoot(msg, cls = '') {
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = msg;
+  bootLog.appendChild(line);
+}
+function sysLog(msg) {
+  const line = document.createElement('div');
+  line.textContent = msg;
+  logFeed.prepend(line);
+  while (logFeed.children.length > 6) logFeed.lastChild.remove();
+}
+addEventListener('error', e => toast('⚠ ' + (e.message || e.type), 8000));
+addEventListener('unhandledrejection', e => toast('⚠ ' + (e.reason?.message || e.reason), 8000));
+
+/* ═══════════════ 时钟(本地实时) ═══════════════ */
+const WEEK = ['日','一','二','三','四','五','六'];
+setInterval(() => {
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  document.getElementById('clock').textContent = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  document.getElementById('date').textContent = `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} 周${WEEK[d.getDay()]}`;
+}, 250);
+
+/* ═══════════════ 遥测/笔记渲染 ═══════════════ */
+function renderTele(t) {
+  const set = (bar, val, pct, warn) => {
+    document.getElementById(bar + 'Bar').style.width = Math.round(pct * 100) + '%';
+    document.getElementById(bar + 'Bar').classList.toggle('warn', !!warn);
+    document.getElementById(bar + 'Val').textContent = val;
+  };
+  if (t.cpu != null) set('cpu', Math.round(t.cpu * 100) + '%', Math.min(1, t.cpu), t.cpu > 0.8);
+  if (t.disk) {
+    const [total, free] = t.disk, used = total - free;
+    set('disk', Math.round(free) + 'G FREE', total ? used / total : 0, total && free / total < 0.1);
+  }
+  if (t.batt) {
+    const [pct, chg] = t.batt;
+    if (pct != null) set('batt', pct + '%' + (chg ? ' ⚡' : ''), pct / 100, pct < 20 && !chg);
+    else set('batt', 'AC', 1, false);
+  }
+  if (t.uptime) document.getElementById('uptime').textContent = 'UPTIME ' + t.uptime;
+  if (t.weather) document.getElementById('weather').textContent = t.weather[0] + ' · ' + t.weather[1];
+}
+function renderNotes(items) {
+  const box = document.getElementById('notesList');
+  box.innerHTML = '';
+  for (const it of items.slice(0, 8)) {
+    const d = document.createElement('div');
+    d.textContent = it;
+    box.appendChild(d);
+  }
+}
+
+/* ═══════════════ 手势状态 ═══════════════ */
+const hand = {
+  present: false,
+  openness: 0.5,
+  rawOpenness: 0.5,
+  x: 0.5, y: 0.5,
+  twoHands: false,
+  pinch: false,
+};
+let pinchLock = 0;
+
+function fingerOpenness(lm) {
+  const wrist = lm[0], base = lm[9];
+  const palm = Math.hypot(base.x - wrist.x, base.y - wrist.y, base.z - wrist.z);
+  let sum = 0;
+  for (const tip of [8, 12, 16, 20]) {
+    sum += Math.hypot(lm[tip].x - wrist.x, lm[tip].y - wrist.y, lm[tip].z - wrist.z);
+  }
+  const ratio = sum / 4 / palm;
+  return Math.min(1, Math.max(0, (ratio - 1.15) / 0.7));
+}
+
+const HAND_LINKS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+
+const overlay = document.getElementById('handOverlay');
+const octx = overlay.getContext('2d');
+function sizeOverlay() { overlay.width = innerWidth; overlay.height = innerHeight; }
+sizeOverlay();
+
+function drawHands(allLandmarks) {
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  const W = overlay.width, H = overlay.height;
+  const px = p => [(1 - p.x) * W, p.y * H];
+  for (const lm of allLandmarks) {
+    octx.strokeStyle = 'rgba(125,249,255,.55)';
+    octx.lineWidth = 2;
+    octx.shadowColor = 'rgba(125,249,255,.9)';
+    octx.shadowBlur = 10;
+    for (const [a, b] of HAND_LINKS) {
+      octx.beginPath();
+      octx.moveTo(...px(lm[a]));
+      octx.lineTo(...px(lm[b]));
+      octx.stroke();
+    }
+    octx.fillStyle = 'rgba(174,252,255,.9)';
+    for (const p of lm) {
+      const [x, y] = px(p);
+      octx.beginPath();
+      octx.arc(x, y, 3, 0, 7);
+      octx.fill();
+    }
+  }
+  octx.shadowBlur = 0;
+}
+
+/* ═══════════════ 手势检测(MediaPipe tasks-vision,全部本地文件) ═══════════════ */
+const video = document.getElementById('video');
+let landmarker = null;
+let lastVideoTime = -1, lastFrame = performance.now();
+
+function onLandmarks(allHands) {
+  hand.present = allHands.length > 0;
+  hand.twoHands = allHands.length >= 2;
+  drawHands(allHands);
+
+  if (!hand.present) {
+    handStateEl.textContent = '未检测到手';
+    handStateEl.classList.remove('active');
+    hand.pinch = false;
+    return;
+  }
+
+  const lm = allHands[0];
+
+  if (hand.twoHands) {
+    const c0 = allHands[0][9], c1 = allHands[1][9];
+    const spread = Math.min(1, Math.hypot(c0.x - c1.x, c0.y - c1.y) * 1.6);
+    hand.rawOpenness = spread;
+    hand.x = 1 - (c0.x + c1.x) / 2; hand.y = (c0.y + c1.y) / 2;
+    handStateEl.textContent = '双手张合 · ' + Math.round(spread * 100) + '%';
+  } else {
+    hand.rawOpenness = fingerOpenness(lm);
+    hand.x = 1 - lm[9].x; hand.y = lm[9].y;
+    handStateEl.textContent = (hand.rawOpenness > 0.5 ? '手掌张开' : '握拳聚拢') + ' · ' + Math.round(hand.rawOpenness * 100) + '%';
+  }
+  handStateEl.classList.add('active');
+
+  const pinchDist = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y);
+  const isPinch = pinchDist < 0.05;
+  if (isPinch && !hand.pinch && performance.now() > pinchLock) {
+    pinchLock = performance.now() + 900;
+    const next = SHAPE_KEYS[(SHAPE_KEYS.indexOf(currentShape) + 1) % SHAPE_KEYS.length];
+    setShape(next);
+    handStateEl.textContent = '捏合 · 切换形态';
+  }
+  hand.pinch = isPinch;
+}
+
+function detectLoop() {
+  if (landmarker && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    const now = performance.now();
+    fpsEl.textContent = Math.round(1000 / (now - lastFrame)) + ' FPS';
+    lastFrame = now;
+    try {
+      const res = landmarker.detectForVideo(video, now);
+      onLandmarks(res.landmarks || []);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+  requestAnimationFrame(detectLoop);
+}
+
+/* 启动流程:点击按钮 → 摄像头 → 模型 → 检测循环 */
+document.getElementById('startBtn').addEventListener('click', async e => {
+  e.target.style.display = 'none';
+  let camOK = false;
+
+  logBoot('▸ 正在打开摄像头…');
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480, facingMode: 'user' },
+    });
+    video.srcObject = stream;
+    await new Promise(r => { video.onloadedmetadata = r; });
+    await video.play();
+    logBoot('✓ 摄像头就绪 (' + video.videoWidth + '×' + video.videoHeight + ')', 'ok');
+    camOK = true;
+  } catch (err) {
+    logBoot('✗ 摄像头失败: ' + err.name + ' — ' + err.message, 'err');
+    logBoot('  将以滚轮模式运行(滚轮=张合, 1-6=形态, 空格=换色)', 'err');
+  }
+
+  if (camOK) {
+    logBoot('▸ 正在加载手势识别模型(本地)…');
+    try {
+      const { FilesetResolver, HandLandmarker } = await import('./vendor/vision_bundle.mjs');
+      const fileset = await FilesetResolver.forVisionTasks('./vendor/wasm');
+      landmarker = await HandLandmarker.createFromOptions(fileset, {
+        baseOptions: { modelAssetPath: './vendor/hand_landmarker.task', delegate: 'GPU' },
+        runningMode: 'VIDEO',
+        numHands: 2,
+        minHandDetectionConfidence: 0.5,
+        minHandPresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5,
+      });
+      logBoot('✓ 手势识别就绪', 'ok');
+      handStateEl.textContent = '未检测到手';
+      detectLoop();
+    } catch (err) {
+      console.error(err);
+      logBoot('✗ 模型加载失败: ' + (err.message || err), 'err');
+      logBoot('  将以滚轮模式运行', 'err');
+    }
+  }
+
+  sysLog('GESTURE LINK ' + (landmarker ? 'ONLINE' : 'OFFLINE'));
+  setTimeout(() => document.getElementById('boot').classList.add('hide'), camOK && landmarker ? 700 : 2600);
+});
+
+/* 无摄像头兜底:滚轮控制张合度 */
+addEventListener('wheel', e => {
+  if (!hand.present) {
+    hand.rawOpenness = Math.min(1, Math.max(0, hand.rawOpenness - e.deltaY * 0.0012));
+  }
+}, { passive: true });
+
+/* ═══════════════ 语音链路(SSE ← python -m jarvis --holo) ═══════════════ */
+const voice = { state: 'idle', online: false };
+const STATE_COLORS = { listening: '#7dffb2', thinking: '#b47dff', speaking: '#ffc247' };
+const STATE_NAMES  = { idle: '待机', listening: '聆听中', thinking: '思考中', speaking: '说话中' };
+const voiceEl = document.getElementById('voiceState');
+const subs = document.getElementById('subs');
+const subUser = document.getElementById('subUser');
+const subJarvis = document.getElementById('subJarvis');
+let subsTimer = 0;
+
+function showSubs() {
+  subs.classList.add('show');
+  clearTimeout(subsTimer);
+  subsTimer = setTimeout(() => subs.classList.remove('show'), 12000);
+}
+
+function setVoiceState(s) {
+  voice.state = s;
+  applyColor(STATE_COLORS[s] || userColor);
+  voiceEl.textContent = STATE_NAMES[s] || s;
+  voiceEl.classList.toggle('on', s !== 'idle');
+}
+
+let esFails = 0, demoTimer = 0;
+function connectVoice() {
+  const es = new EventSource('/events');
+  es.onopen = () => {
+    esFails = 0;
+    voice.online = true;
+    clearInterval(demoTimer); demoTimer = 0;
+    voiceEl.classList.remove('off');
+    voiceEl.textContent = STATE_NAMES[voice.state];
+    sysLog('VOICE LINK ONLINE');
+  };
+  es.onerror = () => {
+    voice.online = false;
+    if (++esFails >= 3) {           // 用 serve.py 单开页面时没有 /events → 演示模式
+      es.close();
+      voiceEl.textContent = '未连接';
+      voiceEl.className = 'off';
+      startDemo();
+    }
+  };
+  es.onmessage = e => {
+    const ev = JSON.parse(e.data);
+    if (ev.type === 'state') setVoiceState(ev.value);
+    else if (ev.type === 'heard') {
+      subUser.textContent = '你 · ' + ev.value;
+      subJarvis.textContent = '';
+      showSubs();
+    } else if (ev.type === 'reply') {
+      subJarvis.textContent += ev.value;
+      showSubs();
+    } else if (ev.type === 'log') sysLog(ev.value);
+    else if (ev.type === 'telemetry') renderTele(ev.value);
+    else if (ev.type === 'notes') renderNotes(ev.value);
+  };
+}
+connectVoice();
+
+/* 后端不在线时的演示数据,让统一控制台单开页面也完整可看 */
+function startDemo() {
+  if (demoTimer) return;
+  sysLog('VOICE LINK OFFLINE · 演示模式');
+  sysLog('启动方式: python3 -m jarvis --holo');
+  renderNotes(['演示模式:后端未连接', '用 python3 -m jarvis --holo 启动完整贾维斯', '喊「贾维斯」即可语音唤醒']);
+  let cpu = 0.3;
+  const tick = () => {
+    cpu = Math.min(0.95, Math.max(0.05, cpu + (Math.random() - .5) * 0.1));
+    renderTele({
+      cpu,
+      disk: [500, 187 + Math.random() * 2],
+      batt: [80, false],
+      uptime: 'SIM',
+      weather: ['--°C', 'SIMULATED'],
+    });
+  };
+  tick();
+  demoTimer = setInterval(tick, 2000);
+}
+
+/* 点击粒子核心 = 点桌宠反应堆:强制唤醒 */
+canvas.addEventListener('click', () => {
+  if (voice.online) {
+    fetch('/talk', { method: 'POST' }).catch(() => {});
+    setVoiceState('listening');
+  }
+});
+
+/* ═══════════════ 控制面板 ═══════════════ */
+let currentShape = 'sphere';
+function setShape(name) {
+  currentShape = name;
+  targetA.set(TARGETS[name]);
+  for (let i = 0; i < COUNT * 3; i++) velA[i] += (Math.random() - .5) * 0.06;
+  document.querySelectorAll('#shapeRow .chip').forEach(b =>
+    b.classList.toggle('on', b.dataset.shape === name));
+}
+document.getElementById('shapeRow').addEventListener('click', e => {
+  const btn = e.target.closest('button[data-shape]');
+  if (btn) setShape(btn.dataset.shape);
+});
+
+let userColor = '#00e5ff';
+function applyColor(hex) {
+  uniforms.uColor.value.set(hex);
+  glowMat.color.set(hex);
+}
+function setColor(hex) {
+  userColor = hex;
+  if (voice.state === 'idle') applyColor(hex);
+  document.querySelectorAll('#colorRow .swatch').forEach(b =>
+    b.classList.toggle('on', b.dataset.color === hex));
+}
+document.getElementById('colorRow').addEventListener('click', e => {
+  const btn = e.target.closest('button[data-color]');
+  if (btn) setColor(btn.dataset.color);
+});
+document.getElementById('colorPick').addEventListener('input', e => setColor(e.target.value));
+
+addEventListener('keydown', e => {
+  const n = +e.key;
+  if (n >= 1 && n <= SHAPE_KEYS.length) setShape(SHAPE_KEYS[n-1]);
+  else if (e.key === ' ') setColor('#' + new THREE.Color().setHSL(Math.random(), 0.9, 0.65).getHexString());
+});
+
+/* ═══════════════ 主循环:粒子物理 ═══════════════ */
+const clock = new THREE.Clock();
+let rotY = 0, rotX = 0;
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const t = clock.elapsedTime;
+  uniforms.uTime.value = t;
+
+  hand.openness += (hand.rawOpenness - hand.openness) * Math.min(1, dt * 8);
+  const open = hand.openness;
+  gaugeFill.style.width = Math.round(open * 100) + '%';
+
+  // 语音状态叠加能量:聆听常亮,思考缓慢呼吸,说话快速脉动
+  let vis = open;
+  if (voice.state === 'listening')      vis = Math.max(vis, 0.8);
+  else if (voice.state === 'thinking')  vis = Math.max(vis, 0.55 + 0.2 * Math.sin(t * 2.4));
+  else if (voice.state === 'speaking')  vis = Math.max(vis, 0.55 + 0.3 * Math.abs(Math.sin(t * 7)));
+  uniforms.uEnergy.value = vis;
+  glowMat.opacity = 0.25 + vis * 0.45;
+  glow.scale.setScalar(4 + vis * 5);
+
+  // 缩放:握拳 0.45x → 张开 1.6x;扩散噪声随张开增强;说话时轻微脉动
+  let scale = 0.45 + open * 1.15;
+  if (voice.state === 'speaking') scale += 0.06 * Math.sin(t * 7);
+  const scatter = open * open * 0.9;
+
+  // 手位置牵引旋转(hand.x 已镜像:手往右移,粒子往右转);思考时自转加速
+  const idleSpin = voice.state === 'thinking' ? 0.9 : 0.12;
+  const targetRotY = hand.present ? (hand.x - 0.5) * 2.2 : rotY + dt * idleSpin;
+  const targetRotX = hand.present ? (hand.y - 0.5) * 1.2 : Math.sin(t * 0.2) * 0.15;
+  rotY += (targetRotY - rotY) * dt * 3;
+  rotX += (targetRotX - rotX) * dt * 3;
+  if (!hand.present) rotY += dt * idleSpin;
+  points.rotation.set(rotX, rotY, 0);
+
+  const spring = 4.5, damp = Math.exp(-dt * 3.2);
+  for (let i = 0; i < COUNT; i++) {
+    const j = i * 3, s = seedA[i];
+    const tx = targetA[j] * scale, ty = targetA[j+1] * scale, tz = targetA[j+2] * scale;
+    velA[j]   = (velA[j]   + (tx - posA[j])   * spring * dt) * damp;
+    velA[j+1] = (velA[j+1] + (ty - posA[j+1]) * spring * dt) * damp;
+    velA[j+2] = (velA[j+2] + (tz - posA[j+2]) * spring * dt) * damp;
+    if (scatter > 0.01) {
+      velA[j]   += Math.sin(t * 2.1 + s * 91.7) * scatter * dt * (0.5 + s);
+      velA[j+1] += Math.cos(t * 1.7 + s * 47.3) * scatter * dt * (0.5 + s);
+      velA[j+2] += Math.sin(t * 2.6 + s * 133.1) * scatter * dt * (0.5 + s);
+    }
+    posA[j] += velA[j]; posA[j+1] += velA[j+1]; posA[j+2] += velA[j+2];
+  }
+  geo.attributes.position.needsUpdate = true;
+
+  renderer.render(scene, camera3d);
+}
+animate();
+
+addEventListener('resize', () => {
+  camera3d.aspect = innerWidth / innerHeight;
+  camera3d.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  sizeOverlay();
+});
+</script>
+</body>
+</html>

@@ -219,7 +219,8 @@ def run_assistant(ui, stop: threading.Event) -> None:
 
 
 def main() -> int:
-    use_pet = "--no-pet" not in sys.argv[1:]
+    use_holo = "--holo" in sys.argv[1:]
+    use_pet = "--no-pet" not in sys.argv[1:] and not use_holo
 
     if not config.LLM_BASE_URL:
         print("✗ 没填中转站地址。", file=sys.stderr)
@@ -244,7 +245,16 @@ def main() -> int:
             use_pet = False
 
     stop = threading.Event()
-    if use_pet:
+    if use_holo:
+        from .holo.bridge import HoloUI
+        holo = HoloUI()
+        worker = threading.Thread(target=run_assistant, args=(holo, stop), daemon=True)
+        worker.start()
+        try:
+            holo.run()                             # 主线程跑本地服务,Ctrl+C 退出
+        finally:
+            stop.set()
+    elif use_pet:
         pet = DesktopPet()
         worker = threading.Thread(target=run_assistant, args=(pet, stop), daemon=True)
         worker.start()
